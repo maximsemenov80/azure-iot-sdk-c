@@ -15,6 +15,6 @@ static const char* const PROV_DISABLE_STATUS = "disabled";
 
 static const char* const RETRY_AFTER_KEY_VALUE = "retry-after";
 
-static const char* const PROV_API_VERSION = "2021-06-01";
+static const char* const PROV_API_VERSION = "2025-07-01-preview";
 
 #endif // PROV_CLIENT_CONST_H

@@ -48,6 +48,8 @@ MU_DEFINE_ENUM_WITHOUT_INVALID(PROV_DEVICE_RESULT, PROV_DEVICE_RESULT_VALUE);
 
 MU_DEFINE_ENUM_WITHOUT_INVALID(PROV_DEVICE_REG_STATUS, PROV_DEVICE_REG_STATUS_VALUES);
 static STATIC_VAR_UNUSED const char* const PROV_REGISTRATION_ID = "registration_id";
+static STATIC_VAR_UNUSED const char* const PROV_CERTIFICATE_SIGNING_REQUEST = "certificate_signing_request";
+static STATIC_VAR_UNUSED const char* const PROV_CERTIFICATE_SIGNING_REQUEST_PRIVATE_KEY = "certificate_signing_request_pk";
 static STATIC_VAR_UNUSED const char* const PROV_OPTION_LOG_TRACE = "logtrace";
 static STATIC_VAR_UNUSED const char* const PROV_OPTION_TIMEOUT = "provisioning_timeout";
 

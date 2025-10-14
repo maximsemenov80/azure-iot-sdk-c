@@ -48,12 +48,17 @@ static const char* const PROV_FAILED_STATUS = "failed";
 static const char* const PROV_BLACKLISTED_STATUS = "blacklisted";
 static const char* const JSON_CUSTOM_DATA_TAG = "payload";
 static const char* const JSON_NODE_RETURNED_DATA = "payload";
+static const char* const JSON_NODE_CERT_SIGNING_REQUEST = "csr";
+static const char* const JSON_NODE_ISSUED_CERT_CHAIN = "issuedCertificateChain";
 
 static const char* const SAS_TOKEN_SCOPE_FMT = "%s/registrations/%s";
 
 static const char* const REGISTRATION_ID = "registrationId";
 static const char* const JSON_ENDORSEMENT_KEY_NODE = "endorsementKey";
 static const char* const JSON_STORAGE_ROOT_KEY_NODE = "storageRootKey";
+
+static const char* const BEGIN_CERTIFICATE_HEADER = "-----BEGIN CERTIFICATE-----\r\n";
+static const char* const END_CERTIFICATE_FOOTER = "\r\n-----END CERTIFICATE-----\r\n";
 
 #define DPS_HUB_ERROR_NO_HUB        400208
 #define DPS_HUB_ERROR_UNAUTH        400209
@@ -115,6 +120,12 @@ typedef struct PROV_INSTANCE_INFO_TAG
 
     char* custom_request_data;
     char* custom_response_data;
+
+    // Base-64-encoded DER certificate-signing-request. 
+    char* certificate_signing_request;
+
+    // PKCS8 P256 private key used in certificate signing request. 
+    char* certificate_signing_request_private_key;
 } PROV_INSTANCE_INFO;
 
 static char* prov_transport_challenge_callback(const unsigned char* nonce, size_t nonce_len, const char* key_name, void* user_ctx)
@@ -301,6 +312,85 @@ static char* retrieve_json_string(JSON_Object* json_object, const char* field_na
     return result;
 }
 
+static int retrieve_json_string_array(JSON_Object* json_object, const char* field_name, bool is_required, char*** array, size_t* size)
+{
+    int result;
+    JSON_Value* json_field;
+    if ((json_field = json_object_get_value(json_object, field_name)) == NULL)
+    {
+        if (is_required)
+        {
+            LogError("failure retrieving json object value %s", field_name);
+            result = MU_FAILURE;
+        }
+        else
+        {
+            *size = 0;
+            result = 0;
+        }
+    }
+    else
+    {
+        JSON_Array* json_array = json_value_get_array(json_field);
+
+        if (json_array != NULL)
+        {
+            *size = json_array_get_count(json_array);
+
+            if (*size > 0)
+            {
+                *array = calloc(*size, sizeof(char*));
+
+                if (*array == NULL)
+                {
+                    LogError("failure allocating array for json elements");
+                    result = MU_FAILURE;
+                }
+                else
+                {
+                    result = 0;
+
+                    for (size_t i = 0; i < *size; i++)
+                    {
+                        const char* json_item = NULL;
+
+                        if ((json_item = json_array_get_string(json_array, i)) == NULL)
+                        {
+                            LogError("json_array_get_string failed");
+                            result = MU_FAILURE;
+                            break;
+                        }
+                        else if (mallocAndStrcpy_s(&((*array)[i]), json_item) != 0)
+                        {
+                            LogError("failure storing json array element");
+                            result = MU_FAILURE;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                result = 0;
+            }
+        }
+        else
+        {
+            if (is_required)
+            {
+                LogError("failure retrieving json object array %s", field_name);
+                result = MU_FAILURE;
+            }
+            else
+            {
+                *size = 0;
+                result = 0;
+            }
+        }
+    }
+
+    return result;
+}
+
 static JSON_Value* construct_security_type_json(PROV_INSTANCE_INFO* prov_info, const char* ek_value, const char* srk_value)
 {
     JSON_Value* result;
@@ -417,6 +507,22 @@ static char* prov_transport_create_json_payload(const char* ek_value, const char
                 }
             }
 
+            if (!error_encountered && prov_info->certificate_signing_request != NULL)
+            {
+                JSON_Object* json_object;
+
+                if ((json_object = json_value_get_object(json_root)) == NULL)
+                {
+                    LogError("failure retrieving node root object");
+                    error_encountered = true;
+                }
+                else if (json_object_set_string(json_object, JSON_NODE_CERT_SIGNING_REQUEST, prov_info->certificate_signing_request) != JSONSuccess)
+                {
+                    LogError("failure setting %s value", JSON_NODE_CERT_SIGNING_REQUEST);
+                    error_encountered = true;
+                }
+            }
+
             if (!error_encountered)
             {
                 char* json_string = json_serialize_to_string(json_root);
@@ -435,6 +541,66 @@ static char* prov_transport_create_json_payload(const char* ek_value, const char
             }
             json_value_free(json_root);
         }
+    }
+
+    return result;
+}
+
+static PROV_JSON_INFO* create_prov_json_info()
+{
+    PROV_JSON_INFO* result = malloc(sizeof(PROV_JSON_INFO));
+    (void)memset(result, 0, sizeof(PROV_JSON_INFO));
+    return result;
+}
+
+static void destroy_prov_json_info(PROV_JSON_INFO* prov_info)
+{
+    if (prov_info != NULL)
+    {
+        free(prov_info->operation_id);
+        BUFFER_delete(prov_info->authorization_key);
+        free(prov_info->key_name);
+        free(prov_info->iothub_uri);
+        free(prov_info->device_id);
+        free(prov_info);
+    }
+}
+
+static char* format_dps_issued_certificate_chain(char** issued_certificate_chain, size_t issued_certificate_chain_length)
+{
+    char* result;
+    size_t result_length = sizeof('\0');
+    size_t header_length = strlen(BEGIN_CERTIFICATE_HEADER);
+    size_t footer_length = strlen(END_CERTIFICATE_FOOTER);
+
+    for (size_t i = 0; i < issued_certificate_chain_length; i++)
+    {
+        result_length += strlen(BEGIN_CERTIFICATE_HEADER) + strlen(issued_certificate_chain[i]) + strlen(END_CERTIFICATE_FOOTER);
+    }
+
+    result = malloc(sizeof(char) * result_length);
+
+    if (result == NULL)
+    {
+        LogError("failed allocating memory for formatted certificate chain");
+    }
+    else
+    {
+        size_t bytes_written = 0;
+
+        for (size_t i = 0; i < issued_certificate_chain_length; i++)
+        {
+            size_t issued_certificate_length = strlen(issued_certificate_chain[i]);
+
+            (void)memcpy(result + bytes_written, BEGIN_CERTIFICATE_HEADER, header_length);
+            bytes_written += header_length;
+            (void)memcpy(result + bytes_written, issued_certificate_chain[i], issued_certificate_length);
+            bytes_written += issued_certificate_length;
+            (void)memcpy(result + bytes_written, END_CERTIFICATE_FOOTER, footer_length);
+            bytes_written += footer_length;
+        }
+
+        result[bytes_written] = '\0';
     }
 
     return result;
@@ -461,14 +627,13 @@ static PROV_JSON_INFO* prov_transport_process_json_reply(const char* json_docume
         json_value_free(root_value);
         result = NULL;
     }
-    else if ((result = malloc(sizeof(PROV_JSON_INFO))) == NULL)
+    else if ((result = create_prov_json_info()) == NULL)
     {
         LogError("failure allocating PROV_JSON_INFO");
         json_value_free(root_value);
     }
     else
     {
-        memset(result, 0, sizeof(PROV_JSON_INFO));
         PROV_INSTANCE_INFO* prov_info = (PROV_INSTANCE_INFO*)user_ctx;
         JSON_Value* json_status = json_object_get_value(json_object, JSON_NODE_STATUS);
 
@@ -506,7 +671,7 @@ static PROV_JSON_INFO* prov_transport_process_json_reply(const char* json_docume
                 {
                     LogError("failure retrieving json auth key value");
                     prov_info->error_reason = PROV_DEVICE_RESULT_PARSING;
-                    free(result);
+                    destroy_prov_json_info(result);
                     result = NULL;
                 }
                 else
@@ -516,7 +681,7 @@ static PROV_JSON_INFO* prov_transport_process_json_reply(const char* json_docume
                     {
                         LogError("failure creating buffer nonce field");
                         prov_info->error_reason = PROV_DEVICE_RESULT_MEMORY;
-                        free(result);
+                        destroy_prov_json_info(result);
                         result = NULL;
                     }
                     else
@@ -526,8 +691,7 @@ static PROV_JSON_INFO* prov_transport_process_json_reply(const char* json_docume
                         {
                             LogError("failure retrieving keyname field");
                             prov_info->error_reason = PROV_DEVICE_RESULT_PARSING;
-                            BUFFER_delete(result->authorization_key);
-                            free(result);
+                            destroy_prov_json_info(result);
                             result = NULL;
                         }
                     }
@@ -540,7 +704,7 @@ static PROV_JSON_INFO* prov_transport_process_json_reply(const char* json_docume
                 {
                     LogError("Failure: operation_id node is mising");
                     prov_info->error_reason = PROV_DEVICE_RESULT_PARSING;
-                    free(result);
+                    destroy_prov_json_info(result);
                     result = NULL;
                 }
                 break;
@@ -552,7 +716,7 @@ static PROV_JSON_INFO* prov_transport_process_json_reply(const char* json_docume
                 {
                     LogError("failure retrieving json registration status node");
                     prov_info->error_reason = PROV_DEVICE_RESULT_PARSING;
-                    free(result);
+                    destroy_prov_json_info(result);
                     result = NULL;
                 }
                 else
@@ -565,15 +729,15 @@ static PROV_JSON_INFO* prov_transport_process_json_reply(const char* json_docume
                         if ((json_tpm_node = json_object_get_object(json_reg_status_node, JSON_NODE_TPM_NODE)) == NULL)
                         {
                             LogError("failure retrieving tpm node json_tpm_node: %p, auth key: %p", json_tpm_node, result->authorization_key);
-                            free(result);
                             prov_info->error_reason = PROV_DEVICE_RESULT_PARSING;
+                            destroy_prov_json_info(result);
                             result = NULL;
                         }
                         else if ((auth_key = json_object_get_value(json_tpm_node, JSON_NODE_AUTH_KEY)) == NULL)
                         {
                             LogError("failure retrieving json auth key value");
-                            free(result);
                             prov_info->error_reason = PROV_DEVICE_RESULT_PARSING;
+                            destroy_prov_json_info(result);
                             result = NULL;
                         }
                         else
@@ -583,14 +747,14 @@ static PROV_JSON_INFO* prov_transport_process_json_reply(const char* json_docume
                             {
                                 LogError("failure getting nonce field from json");
                                 prov_info->error_reason = PROV_DEVICE_RESULT_MEMORY;
-                                free(result);
+                                destroy_prov_json_info(result);
                                 result = NULL;
                             }
                             else if ((result->authorization_key = Azure_Base64_Decode(nonce_field)) == NULL)
                             {
                                 LogError("failure creating buffer nonce field");
                                 prov_info->error_reason = PROV_DEVICE_RESULT_MEMORY;
-                                free(result);
+                                destroy_prov_json_info(result);
                                 result = NULL;
                             }
                         }
@@ -598,6 +762,9 @@ static PROV_JSON_INFO* prov_transport_process_json_reply(const char* json_docume
 
                     if (result != NULL)
                     {
+                        char** issued_certificate_chain;
+                        size_t issued_certificate_chain_length;
+
                         if (
                             ((result->iothub_uri = retrieve_json_string(json_reg_status_node, JSON_NODE_ASSIGNED_HUB, true)) == NULL) ||
                             ((result->device_id = retrieve_json_string(json_reg_status_node, JSON_NODE_DEVICE_ID, true)) == NULL)
@@ -605,15 +772,56 @@ static PROV_JSON_INFO* prov_transport_process_json_reply(const char* json_docume
                         {
                             LogError("failure retrieving json value assigned_hub: %p, device_id: %p", result->iothub_uri, result->device_id);
                             prov_info->error_reason = PROV_DEVICE_RESULT_PARSING;
-                            free(result->iothub_uri);
-                            free(result->authorization_key);
-                            free(result);
+                            destroy_prov_json_info(result);
+                            result = NULL;
+                        }
+                        else if (prov_info->certificate_signing_request != NULL && retrieve_json_string_array(json_reg_status_node, JSON_NODE_ISSUED_CERT_CHAIN, true, &issued_certificate_chain, &issued_certificate_chain_length))
+                        {
+                            LogError("failure retrieving json value issued_certificate_chain");
+                            prov_info->error_reason = PROV_DEVICE_RESULT_PARSING;
+                            destroy_prov_json_info(result);
                             result = NULL;
                         }
                         else
                         {
                             // Get the returned Data from the payload if it's there
                             retrieve_json_payload(json_reg_status_node, prov_info);
+
+                            // Inject DPS-issued certificate chain in the hsm platform for Azure IoT Hub device client to authenticate with.
+                            if (issued_certificate_chain_length > 0)
+                            {
+                                char* cert_chain = format_dps_issued_certificate_chain(issued_certificate_chain, issued_certificate_chain_length);
+
+                                if (cert_chain == NULL)
+                                {
+                                    LogError("failure retrieving json value issued_certificate_chain");
+                                    destroy_prov_json_info(result);
+                                    result = NULL;
+                                }
+                                else
+                                {
+                                    if (prov_auth_set_certificate(prov_info->prov_auth_handle, cert_chain) != 0)
+                                    {
+                                        LogError("failure retrieving json value issued_certificate_chain");
+                                        destroy_prov_json_info(result);
+                                        result = NULL;
+                                    }
+                                    else if (prov_auth_set_key(prov_info->prov_auth_handle, prov_info->certificate_signing_request_private_key) != 0)
+                                    {
+                                        LogError("failure retrieving json value issued_certificate_chain");
+                                        destroy_prov_json_info(result);
+                                        result = NULL;
+                                    }
+
+                                    free(cert_chain);
+                                }
+
+                                while (issued_certificate_chain_length > 0)
+                                {
+                                    free(issued_certificate_chain[--(issued_certificate_chain_length)]);
+                                }
+                                free(issued_certificate_chain);
+                            }
                         }
                     }
                 }
@@ -700,6 +908,10 @@ static void cleanup_prov_info(PROV_INSTANCE_INFO* prov_info)
     }
     free(prov_info->registration_id);
     prov_info->registration_id = NULL;
+    free(prov_info->certificate_signing_request);
+    prov_info->certificate_signing_request = 0;
+    free(prov_info->certificate_signing_request_private_key);
+    prov_info->certificate_signing_request_private_key = 0;
     prov_info->auth_attempts_made = 0;
 }
 
@@ -831,6 +1043,7 @@ static void destroy_instance(PROV_INSTANCE_INFO* prov_info)
     cleanup_prov_info(prov_info);
     // Clean custom request data
     free(prov_info->custom_request_data);
+    free(prov_info->certificate_signing_request);
     prov_info->custom_request_data = NULL;
     if (prov_info->custom_response_data != NULL)
     {
@@ -1306,6 +1519,60 @@ PROV_DEVICE_RESULT Prov_Device_LL_SetOption(PROV_DEVICE_LL_HANDLE handle, const 
                     }
                     handle->registration_id = temp_reg;
                     handle->user_supplied_reg_id = true;
+                    result = PROV_DEVICE_RESULT_OK;
+                }
+            }
+        }
+        else if (strcmp(PROV_CERTIFICATE_SIGNING_REQUEST, option_name) == 0)
+        {
+            if (handle->prov_state != CLIENT_STATE_READY)
+            {
+                LogError("certificate signing request cannot be set after registration has begun");
+                result = PROV_DEVICE_RESULT_ERROR;
+            }
+            else if (value == NULL)
+            {
+                LogError("certificate signing request cannot be NULL");
+                result = PROV_DEVICE_RESULT_ERROR;
+            }
+            else
+            {
+                char* temp_csr;
+                if (mallocAndStrcpy_s(&temp_csr, (const char*)value) != 0)
+                {
+                    LogError("Failure allocating setting certificate signing request");
+                    result = PROV_DEVICE_RESULT_ERROR;
+                }
+                else
+                {
+                    handle->certificate_signing_request = temp_csr;
+                    result = PROV_DEVICE_RESULT_OK;
+                }
+            }
+        }
+        else if (strcmp(PROV_CERTIFICATE_SIGNING_REQUEST_PRIVATE_KEY, option_name) == 0)
+        {
+            if (handle->prov_state != CLIENT_STATE_READY)
+            {
+                LogError("certificate signing request private key cannot be set after registration has begun");
+                result = PROV_DEVICE_RESULT_ERROR;
+            }
+            else if (value == NULL)
+            {
+                LogError("certificate signing request private key cannot be NULL");
+                result = PROV_DEVICE_RESULT_ERROR;
+            }
+            else
+            {
+                char* temp_pk;
+                if (mallocAndStrcpy_s(&temp_pk, (const char*)value) != 0)
+                {
+                    LogError("Failure allocating setting certificate signing request private key");
+                    result = PROV_DEVICE_RESULT_ERROR;
+                }
+                else
+                {
+                    handle->certificate_signing_request_private_key = temp_pk;
                     result = PROV_DEVICE_RESULT_OK;
                 }
             }

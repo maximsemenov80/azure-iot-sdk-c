@@ -129,6 +129,8 @@ You may also use [common transport options](#general_options).
 |------------------------------|---------------------------------|-------------------|-------------------------------
 | `"logtrace"`                 | PROV_OPTION_LOG_TRACE           | bool*             | Turn on and off log tracing for the transport
 | `"registration_id"`          | PROV_REGISTRATION_ID            | const char*       | The registration ID of the device.
+| `"certificate_signing_request"`| PROV_CERTIFICATE_SIGNING_REQUEST| const char*       | A base64-encoded DER certificate signing request.
+| `"certificate_signing_request_pk"`| PROV_CERTIFICATE_SIGNING_REQUEST_PRIVATE_KEY| const char*       | A PKCS8 P256 certificate private key.
 | `"provisioning_timeout"`     | PROV_OPTION_TIMEOUT             | long*             | Maximum time to allow DPS to complete, in seconds.
 | `"do_work_freq_ms"`          | PROV_OPTION_DO_WORK_FREQUENCY_IN_MS | uint16_t * | Specifies how frequently the worker thread spun by the convenience layer will wake up, in milliseconds.  The default is 1 millisecond.  (Convenience layer APIs only)
 
